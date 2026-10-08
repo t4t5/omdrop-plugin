@@ -16,7 +16,7 @@ For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/open
 omarchy plugin add https://github.com/brentkearney/omdrop-plugin.git
 ```
 
-Answer yes when it asks to enable the plugin. The icon, a triangle dropping into a box, appears on the right of the bar. To move it, run `omarchy bar move netmojo.omdrop --section center`.
+Answer yes when it asks to enable the plugin. The icon, a dot broadcasting two waves, appears on the right of the bar. To move it, run `omarchy bar move netmojo.omdrop --section center`.
 
 On first use, the panel opens a terminal that asks for your password to:
 

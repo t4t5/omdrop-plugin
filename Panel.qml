@@ -945,7 +945,7 @@ Panel {
       Item {
         OmdropIcon {
           anchors.centerIn: parent
-          iconSize: Style.space(12)
+          iconSize: Style.space(14)
           color: root.barIconColor
           crossed: !root.usable
           drifting: root.busy || root.settling
