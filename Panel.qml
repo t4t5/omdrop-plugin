@@ -240,8 +240,6 @@ Panel {
         if (parseInt(windowStops[i].arg) >= mins) { windowIndex = i; return }
     }
   }
-  readonly property color barIconColor: receiving ? barForeground : Qt.darker(barForeground, 1.55)
-
 
   // The headline names the state of the thing the switch controls: Omdrop is
   // on or it is off. "Not receiving" described a symptom, and read as a
@@ -941,12 +939,15 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
+    // Off dims the whole button, as the shell's own indicators do, rather
+    // than darkening the colour: Qt.darker read brighter than they do.
+    dimmed: !root.receiving
     iconComponent: Component {
       Item {
         OmdropIcon {
           anchors.centerIn: parent
           iconSize: Style.space(14)
-          color: root.barIconColor
+          color: root.barForeground
           crossed: !root.usable
           drifting: root.busy || root.settling
         }
