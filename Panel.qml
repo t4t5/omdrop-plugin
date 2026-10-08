@@ -255,9 +255,9 @@ Panel {
     if (!usable) return "Not available"
     if (busy) return (turningOn ? "Turning on" : "Turning off") + busyDots
     if (settling) return "Waking the radio" + busyDots
-    if (!receiving) return "Omdrop off"
+    if (!receiving) return "AirDrop off"
     if (visibility === 0) return "Nobody can see you yet"
-    return "Omdrop on"
+    return "AirDrop on"
   }
 
 
@@ -459,7 +459,7 @@ Panel {
   readonly property bool scanning: radarOpen && root.opened && receiving && visibility === 1
   // The line under the heading. Empty once there is a list to look at.
   readonly property string radarStatus: {
-    if (!receiving) return "Turning Omdrop on"
+    if (!receiving) return "Turning AirDrop on"
     if (!scanning) return "Waiting for the radio"
     if (peers.length === 0) return "Searching for peers"
     if (!namesResolved) return "Resolving peer names"
