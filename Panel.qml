@@ -125,6 +125,13 @@ Panel {
     }
   }
 
+  // The requests' toasts sit on the overlay layer, above this panel, so they
+  // go whenever the panel is showing the requests themselves.
+  Process { id: dismissPromptsProc; command: [root.cli, "prompt", "--dismiss"] }
+  function dismissPrompts() {
+    if (opened && asks.length > 0 && !dismissPromptsProc.running) dismissPromptsProc.running = true
+  }
+
   function answerAsk(id, said) {
     if (answerProc.running) return
     answeringId = id
@@ -917,6 +924,7 @@ Panel {
       if (!audienceProc.running) audience = s.visibility === "contacts" ? "contacts" : "everyone"
       senders = s.senders || 0
       asks = s.asks || []
+      dismissPrompts()
       if (!nameField.activeFocus) nameField.text = shownName
       // Asked once per transition into unusable, not on every poll.
       if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
@@ -970,6 +978,7 @@ Panel {
   // which it does mid-send and comes back from with the send's row showing.
   onOpenedChanged: {
     if (opened && !busy) root.refreshStatus()
+    root.dismissPrompts()
     if (!opened && !sendProc.running && !pickingDir) radarOpen = false
   }
 

@@ -70,8 +70,8 @@ class AsksTests(unittest.TestCase):
     def test_the_toast_escapes_what_the_sender_wrote(self):
         # The shell renders a notification body as markup.
         ask_id = self.publish(files=[("<b>x</b>.txt", 3)], sender="<i>Mac</i>")
-        headline, body, left = self.run_cli("toast", ask_id).stdout.splitlines()
-        self.assertEqual(headline, "<i>Mac</i> wants to send")   # the headline is plain text
+        sender, body, left = self.run_cli("toast", ask_id).stdout.splitlines()
+        self.assertEqual(sender, "<i>Mac</i>")   # for the headline, which is plain text
         self.assertIn("&lt;b&gt;x&lt;", body)
         self.assertNotIn("<b>", body)
         self.assertGreater(int(left), 0)

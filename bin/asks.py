@@ -196,11 +196,12 @@ def main(argv):
             print(f"{record['sender']} wants to send {record['summary']}  "
                   f"[omdrop accept|decline {record['id']}, {record['expires_in']}s left]")
     elif cmd == 'toast' and len(argv) == 2:
-        # Three lines for the notification: headline (plain text), body (the
-        # shell renders it as markup, so escaped), and seconds left.
+        # Three lines for the notification: the sender (`omdrop` makes the
+        # plain-text headline of it), the body (the shell renders it as
+        # markup, so escaped), and seconds left.
         for record in pending():
             if record['id'] == argv[1]:
-                print(f"{record['sender']} wants to send")
+                print(record['sender'])
                 print(html.escape(f"{record['summary']}. Click to accept or decline.", quote=False))
                 print(record['expires_in'])
                 return 0

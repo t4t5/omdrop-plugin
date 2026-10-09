@@ -2284,18 +2284,28 @@ $(asks_py text)"
 # The notification for one request, taken down again once the request is no
 # longer waiting -- answered from the panel, expired, or abandoned -- so it
 # never offers a question that has already gone.
+#
+# Taken down through the shell's own `dismiss`, which matches the headline: a
+# freedesktop CloseNotification only untracks the toast, and the shell keeps
+# drawing it -- on the overlay layer, over the panel's Accept / Decline card,
+# for the rest of its minute.
+PROMPT_TAIL=" wants to send"
 cmd_prompt() {
-  local id=${1:?usage: omdrop prompt ID} headline body left nid
-  { IFS= read -r headline && IFS= read -r body && IFS= read -r left; } < <(asks_py toast "$id") \
+  if [[ "${1:-}" == --dismiss ]]; then
+    # Every request's toast: the panel is showing the requests themselves.
+    omarchy-shell -q notifications dismiss "$PROMPT_TAIL" >/dev/null 2>&1
+    return 0
+  fi
+  local id=${1:?usage: omdrop prompt ID|--dismiss} sender body left
+  { IFS= read -r sender && IFS= read -r body && IFS= read -r left; } < <(asks_py toast "$id") \
     || return 0
+  omarchy-notification-send -u normal -t "$(( left * 1000 ))" \
+    "$sender$PROMPT_TAIL" "$body" --exec "$SELF" review >/dev/null 2>&1
+  # After the toast, so a panel that is already open takes it straight down.
   omarchy-shell -q netmojo.omdrop refresh >/dev/null 2>&1 || true
-  nid=$(omarchy-notification-send -p -u normal -t "$(( left * 1000 ))" \
-          "$headline" "$body" --exec "$SELF" review 2>/dev/null) || nid=
   local waiting; waiting="$(asks_py dir)/$id.json"
   while [[ -e "$waiting" ]]; do sleep 1; done
-  [[ "$nid" =~ ^[0-9]+$ ]] && gdbus call --session --dest org.freedesktop.Notifications \
-    --object-path /org/freedesktop/Notifications \
-    --method org.freedesktop.Notifications.CloseNotification "$nid" >/dev/null 2>&1
+  omarchy-shell -q notifications dismiss "$sender$PROMPT_TAIL" >/dev/null 2>&1
   return 0
 }
 
