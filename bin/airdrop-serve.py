@@ -37,7 +37,8 @@ import libarchive
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import contacts  # noqa: E402  -- sibling module, found via the line above
+import asks  # noqa: E402  -- sibling module, found via the line above
+import contacts  # noqa: E402
 import debugdump  # noqa: E402
 import identity  # noqa: E402
 
@@ -146,6 +147,8 @@ ap.add_argument('--outdir', default=None,
 ap.add_argument('--max-receive-percent', type=int, default=None,
                 help='maximum transfer size as a percentage of currently free output disk space')
 ap.add_argument('--config', default=CONFIG_PATH, help='config file path')
+ap.add_argument('--ask-timeout', type=int, default=60,
+                help='seconds a transfer request waits for the user to accept it before it is declined')
 args = ap.parse_args()
 
 _cfg = load_config(args.config)
@@ -157,6 +160,9 @@ DEST = validate_download_dir(_outdir)
 MAX_RECEIVE_PERCENT = validate_receive_percent(
     args.max_receive_percent if args.max_receive_percent is not None
     else _cfg.get('max_receive_percent', DEFAULT_MAX_RECEIVE_PERCENT))
+if not 5 <= args.ask_timeout <= 600:
+    raise SystemExit('--ask-timeout must be from 5 to 600 seconds')
+ASK_TIMEOUT = args.ask_timeout
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stdout,
                     format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -244,6 +250,11 @@ MAX_CHUNK_LINE_BYTES = 128
 MAX_TRAILER_BYTES = 8 * KIB
 MAX_CONCURRENT_UPLOADS = 2
 UPLOAD_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_UPLOADS)
+# Requests on screen at once. Each holds a connection open while it waits, and
+# anyone nearby can ask, so a burst of them is turned away rather than queued.
+MAX_PENDING_ASKS = 3
+ASK_SLOTS = threading.BoundedSemaphore(MAX_PENDING_ASKS)
+ASK_POLL_SECONDS = 0.25
 
 
 class RequestBodyError(ValueError):
@@ -630,6 +641,52 @@ def store_link(url, dest):
 MEDIA_CAPABILITIES = json.dumps({'Version': 1}).encode()
 
 
+def peer_gone(conn):
+    """True once the sender has closed or reset the connection it asked on.
+
+    Peeks the TCP socket beneath TLS through a duplicate descriptor, so
+    nothing is consumed and the connection's own timeout is not waited out.
+    Bytes waiting there are not a goodbye; only the end of the stream is."""
+    try:
+        with socket.socket(fileno=os.dup(conn.fileno())) as raw:
+            return raw.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b''
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+
+
+def await_answer(conn, summary):
+    """Ask the user, through `omdrop`, whether this transfer may arrive.
+
+    Returns 'accept', 'decline', 'expired' (no answer in time), 'gone' (the
+    sender stopped waiting) or 'unavailable' (there is nowhere to ask, which
+    refuses: a receiver that cannot ask must not accept on the user's behalf).
+    The `ask pending` line is what the watcher turns into a notification."""
+    try:
+        ask_id = asks.publish(summary, ASK_TIMEOUT)
+    except OSError as e:
+        logging.error('ask: nowhere to ask the user (%s): %s', asks.ASK_DIR, e)
+        return 'unavailable'
+    logging.info('ask pending %s', ask_id)
+    deadline = time.monotonic() + ASK_TIMEOUT
+    outcome = 'expired'
+    try:
+        while time.monotonic() < deadline:
+            said = asks.verdict(ask_id)
+            if said:
+                outcome = said
+                break
+            if peer_gone(conn):
+                outcome = 'gone'
+                break
+            time.sleep(ASK_POLL_SECONDS)
+    finally:
+        asks.withdraw(ask_id)
+    logging.info('ask %s: %s', ask_id, outcome)
+    return outcome
+
+
 class Handler(BaseHTTPRequestHandler):
     """AirDrop's receiving endpoints, as sharingd (AirDrop/1.0, macOS 15) and
     iOS actually send them:
@@ -793,7 +850,7 @@ class Handler(BaseHTTPRequestHandler):
                      '; '.join(f"{f.get('FileName')} {f.get('FileType')} {f.get('FileSize')}B"
                                for f in files) or (ask.get('Items') or '-'))
         items = ask.get('Items') or []
-        if len(items) > MAX_ARCHIVE_MEMBERS:
+        if len(items) > MAX_ARCHIVE_MEMBERS or len(files) > MAX_ARCHIVE_MEMBERS:
             self.reject(413, f'Ask exceeds {MAX_ARCHIVE_MEMBERS}-item limit')
             return
         # Contacts Only is enforced here rather than at /Discover, for two
@@ -819,10 +876,30 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Content-Length', '0')
                 self.end_headers()
                 return
-            logging.info('ask accepted: %s', contacts.WHY[outcome])
-            # Remembered per connection: Ask and Upload share one TLS session,
-            # so an Upload that never passed an Ask has nothing vouching for it.
-            self._contacts_ok = True
+            logging.info('ask from a known sender: %s', contacts.WHY[outcome])
+
+        # Then the user decides, in every mode, as on an Apple device: the
+        # sender waits on "Waiting..." while the question is on screen. A
+        # known sender is not waved through, because Contacts Only says who
+        # may ask, not that whatever they send is wanted.
+        if not ASK_SLOTS.acquire(blocking=False):
+            self.reject(503, f'{MAX_PENDING_ASKS} transfer requests are already waiting for an answer')
+            return
+        try:
+            answer = await_answer(self.connection, asks.summarize(ask, MAX_ARCHIVE_MEMBERS))
+        finally:
+            ASK_SLOTS.release()
+        if answer == 'gone':
+            self.close_connection = True
+            return
+        if answer != 'accept':
+            self.reject(403, {'decline': 'declined by the user',
+                              'expired': f'no answer within {ASK_TIMEOUT}s'}.get(answer, 'could not ask the user'))
+            return
+        # Remembered per connection: Ask and Upload share one TLS session, so
+        # an Upload that never passed an accepted Ask has nothing vouching for
+        # it -- and without this check it would skip the question entirely.
+        self._accepted = True
 
         # A `links` transfer is Ask-only: with SUPPORTS_URL (0x01) advertised,
         # iOS puts the URL straight into Items and sends no /Upload at all, so
@@ -846,11 +923,13 @@ class Handler(BaseHTTPRequestHandler):
         self.answer(resp)
 
     def handle_upload(self):
-        # An Upload that never passed an Ask has nothing vouching for it, and
-        # the Upload itself carries no validation record to judge.
-        if contacts.visibility() == 'contacts' and not getattr(self, '_contacts_ok', False):
-            self.reject(403, 'contacts-only upload has no accepted Ask')
+        # An Upload that never passed an Ask has nothing vouching for it: the
+        # user was never asked, and the Upload itself carries no validation
+        # record to judge. One accepted Ask admits one Upload.
+        if not getattr(self, '_accepted', False):
+            self.reject(403, 'upload has no accepted Ask')
             return
+        self._accepted = False
         ctype = self.headers.get('Content-Type', '').split(';')[0].strip().lower()
         if ctype != 'application/x-dvzip':
             self.reject(415, f'unsupported Content-Type {ctype!r}')
@@ -1086,6 +1165,13 @@ server.socket = tls_context().wrap_socket(server.socket, server_side=True,
 logging.info('config %s: %s', args.config, ', '.join(f'{k}={v!r}' for k, v in sorted(_cfg.items())) or 'absent (defaults)')
 logging.info('serving %s._airdrop._tcp.local as %s (%s) on [%s]:%d, receiving into %s',
              sid, NAME, MODEL, IFACE_ADDR, args.port, DEST)
+# Requests a previous run left unanswered went with it. Without the directory
+# every transfer is refused, since there is no way to ask about it.
+try:
+    asks.prepare()
+except OSError as e:
+    logging.error('cannot ask before accepting transfers (%s): %s; every transfer '
+                  'will be refused', asks.ASK_DIR, e)
 
 # systemd stops this unit with SIGTERM, whose default action skips every
 # cleanup below -- including the session reset that frees the port.
@@ -1101,3 +1187,4 @@ except KeyboardInterrupt:
 finally:
     server.reset_sessions()
     server.server_close()
+    asks.clear()

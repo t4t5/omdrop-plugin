@@ -61,6 +61,9 @@ ReadWritePaths=%h/Downloads %h/.omdrop
 # Opt-in protocol dumps (OMDROP_DEBUG=1) go to the runtime directory, never the
 # home directory: they can carry validation records. `-`: absent unless used.
 ReadWritePaths=-%t/omdrop/debug
+# Transfer requests waiting for the user's answer (bin/asks.py). `omdrop on`
+# creates it; without it the receiver can ask nobody and refuses every transfer.
+ReadWritePaths=-%t/omdrop/asks
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET6 AF_INET AF_UNIX AF_NETLINK

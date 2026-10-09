@@ -99,6 +99,49 @@ Panel {
 
   property string lastError: ""
 
+  // ------------------------------------------------------------ asking first
+  //
+  // Transfers waiting for an answer, from `status --json`: nothing a sender
+  // offers arrives until it is accepted here, from a terminal, or not at all
+  // (the receiver declines it after a minute). The notification for one opens
+  // this panel through the `review` IPC call.
+  //
+  // Rows are kept in a model keyed by id, like the peer rows and for the same
+  // reason: the status poll hands over a new array every few seconds, and a
+  // Repeater over it would rebuild the card under a pointer about to click it.
+  property var asks: []
+  property string answeringId: ""
+  ListModel { id: askRows }
+  onAsksChanged: {
+    var want = {}
+    for (var i = 0; i < asks.length; i++) want[asks[i].id] = asks[i]
+    for (var j = askRows.count - 1; j >= 0; j--) {
+      if (!(askRows.get(j).askId in want)) askRows.remove(j)
+      else delete want[askRows.get(j).askId]
+    }
+    for (var k = 0; k < asks.length; k++) {
+      var a = asks[k]
+      if (a.id in want) askRows.append({ askId: a.id, sender: a.sender || "", summary: a.summary || "" })
+    }
+  }
+
+  function answerAsk(id, said) {
+    if (answerProc.running) return
+    answeringId = id
+    lastError = ""
+    answerProc.command = [root.cli, said, id]
+    answerProc.running = true
+  }
+
+  Process {
+    id: answerProc
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: if (text.trim() !== "") root.lastError = text.trim()
+    }
+    onExited: { root.answeringId = ""; root.refreshStatus() }
+  }
+
   readonly property string homePath: Quickshell.env("HOME") || ""
 
   // ~/Downloads reads better than /home/someone/Downloads.
@@ -873,6 +916,7 @@ Panel {
       if (!soundProc.running) soundOn = s.sound !== false
       if (!audienceProc.running) audience = s.visibility === "contacts" ? "contacts" : "everyone"
       senders = s.senders || 0
+      asks = s.asks || []
       if (!nameField.activeFocus) nameField.text = shownName
       // Asked once per transition into unusable, not on every poll.
       if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
@@ -933,6 +977,10 @@ Panel {
     target: root.ipcTarget
     function toggle(): string { root.toggleOmdrop(); return "ok" }
     function status(): string { return root.stateText }
+    // A request's notification, clicked: show the question.
+    function review(): string { root.refreshStatus(); root.open(); return "ok" }
+    // A request arrived or was answered elsewhere: redraw without waiting.
+    function refresh(): string { root.refreshStatus(); return "ok" }
   }
 
   BarIconButton {
@@ -947,7 +995,8 @@ Panel {
         OmdropIcon {
           anchors.centerIn: parent
           iconSize: Style.space(14)
-          color: root.barForeground
+          // Lit with the urgent colour while a sender is waiting on an answer.
+          color: root.asks.length > 0 ? root.urgent : root.barForeground
           crossed: !root.usable
           drifting: root.busy || root.settling
         }
@@ -1043,6 +1092,86 @@ Panel {
               font.pixelSize: Style.font.caption
               font.bold: true
               font.letterSpacing: 1.2
+            }
+          }
+        }
+
+        // A sender waiting on an answer comes first: it is the one thing in
+        // this panel with a deadline someone else is watching.
+        Repeater {
+          model: askRows
+          delegate: Rectangle {
+            id: askCard
+            required property string askId
+            required property string sender
+            required property string summary
+            readonly property bool answering: root.answeringId === askId
+            width: column.width
+            implicitHeight: askColumn.implicitHeight + Style.space(24)
+            radius: Style.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+            border.width: 1
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+
+            Column {
+              id: askColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(12)
+              anchors.rightMargin: Style.space(12)
+              spacing: Style.space(4)
+
+              // Both lines are the sender's own words, so never markup.
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: askCard.sender
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: "wants to send " + askCard.summary
+                color: Qt.darker(root.foreground, 1.3)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+              }
+
+              Item { width: 1; height: Style.space(6) }
+
+              Row {
+                anchors.right: parent.right
+                spacing: Style.space(8)
+
+                Button {
+                  text: "Decline"
+                  bordered: true
+                  enabled: !askCard.answering
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onClicked: root.answerAsk(askCard.askId, "decline")
+                }
+                Button {
+                  text: "Accept"
+                  bordered: true
+                  active: true
+                  enabled: !askCard.answering
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onClicked: root.answerAsk(askCard.askId, "accept")
+                }
+              }
             }
           }
         }

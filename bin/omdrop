@@ -140,6 +140,10 @@ identity_py() { python3 "$PROJ/bin/identity.py" "$@"; }
 ID_PY=identity_py
 ID_EXPIRY=omdrop-identity-expiry
 
+# Transfer requests waiting for the user's answer; bin/asks.py owns their
+# format, and the receiver writes them.
+asks_py() { python3 "$PROJ/bin/asks.py" "$@"; }
+
 # omdrop's own settings live apart from the receiver's config.toml on purpose:
 # airdrop-serve.py validates that file against a fixed key list and refuses to
 # start on anything it does not recognise, so adding our keys there would stop
@@ -166,7 +170,12 @@ omdrop -- send and receive files with nearby Apple devices
                     Refuses while a send is running, since that would cut it
                     off; --force stops anyway
   toggle            off if receiving, on if not
-  status [--json]   receiving or not, time left, the name Macs see
+  status [--json]   receiving or not, time left, the name Macs see, and
+                    any transfer waiting for your answer
+  accept [ID]       let a waiting transfer arrive. Every transfer waits for
+  decline [ID]      this, from the panel, its notification, or here; with no
+                    ID, the only one waiting. Unanswered ones are declined
+                    after a minute
   send FILE...      send files to a nearby Apple device, as one transfer
                     it accepts once. Turn a window on first (omdrop on):
                     that is what hears the devices around you. --to ADDRESS
@@ -1188,6 +1197,9 @@ cmd_on() {
     # The unit may write opt-in protocol dumps only here (ReadWritePaths= with
     # `-`, ignored when absent), and its sandbox cannot create the directory.
     (umask 077 && mkdir -p -- "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/debug") || true
+    # Likewise where transfer requests wait for an answer, which is not
+    # optional: a receiver that cannot ask refuses everything.
+    (umask 077 && mkdir -p -- "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omdrop/asks") || true
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
     systemctl --user start "$UNIT"
   }
@@ -1325,6 +1337,7 @@ cmd_status() {
     ON="$on" LEFT="$left" VIS="$vis" MODE="$mode" DIR="$(effective_dir)" \
     REASON="$reason" RXPROVEN="$rxproven" NAME="$(effective_name)" \
     AUDIENCE="$(cmd_visibility)" SENDERS="$(sender_count)" \
+    ASKS="$([[ "$on" == true ]] && asks_py json)" \
     SOUND="$(sound_on && echo 1)" python3 -c '
 import json, os
 left, vis = os.environ["LEFT"], os.environ["VIS"]
@@ -1344,6 +1357,8 @@ print(json.dumps({
     # panel can warn that an empty list refuses everybody.
     "visibility": os.environ["AUDIENCE"],
     "senders": int(os.environ["SENDERS"]),
+    # Transfers waiting for the user to accept or decline them.
+    "asks": json.loads(os.environ["ASKS"] or "[]"),
 }))'
     return
   fi
@@ -1391,6 +1406,7 @@ print(json.dumps({
     unknown) printf 'Receiving as "%s" -- %s (cannot tell if anyone can see us: %s is missing)\n' \
                "$(effective_name)" "$window" "${DISCOVERABLE#$PROJ/}" ;;
   esac
+  asks_py text
 }
 
 # ------------------------------------------------------------------- sending
@@ -1932,6 +1948,12 @@ cmd_watch() {
   journalctl --user -u "$UNIT" -f -n 0 -o cat 2>/dev/null | while IFS= read -r line; do
     local files=()
     case "$line" in
+      # A sender is waiting on an answer. Its own process, because the
+      # notification stays up for as long as the question does.
+      *"ask pending "*)
+        local id=${line##*ask pending }
+        [[ "$id" =~ ^[0-9a-f]{16}$ ]] && "$SELF" prompt "$id" &
+        continue ;;
       *"upload "*": stored "*)
         local rest=${line#*: stored }
         IFS=',' read -ra files <<< "$rest" ;;
@@ -2235,6 +2257,57 @@ act_notify() {
     || echo "omdrop: notification failed for $f" >&2
 }
 
+# ------------------------------------------------------------ asking first
+#
+# Nothing a sender offers arrives until the user says so. The receiver holds
+# each request open and records it; the watcher sees its `ask pending` line and
+# runs `prompt`, whose notification opens the panel's Accept / Decline card.
+# The shell's notifications carry one action, a click on the body, which is
+# too easy to give by accident to be "accept" -- so the click only asks the
+# question somewhere that can offer both answers.
+
+cmd_answer() {
+  local said=$1 id=${2:-}
+  if [[ -z "$id" ]]; then
+    local ids; ids=$(asks_py ids)
+    [[ -n "$ids" ]] || die "No transfer is waiting for an answer."
+    [[ "$ids" != *$'\n'* ]] || die "Several transfers are waiting; name one:
+$(asks_py text)"
+    id=$ids
+  fi
+  asks_py answer "$id" "$said" \
+    || die "That transfer is no longer waiting: it was answered, it expired, or the sender gave up."
+  # Redraw an open panel now rather than at its next poll.
+  omarchy-shell -q netmojo.omdrop refresh >/dev/null 2>&1 || true
+}
+
+# The notification for one request, taken down again once the request is no
+# longer waiting -- answered from the panel, expired, or abandoned -- so it
+# never offers a question that has already gone.
+cmd_prompt() {
+  local id=${1:?usage: omdrop prompt ID} headline body left nid
+  { IFS= read -r headline && IFS= read -r body && IFS= read -r left; } < <(asks_py toast "$id") \
+    || return 0
+  omarchy-shell -q netmojo.omdrop refresh >/dev/null 2>&1 || true
+  nid=$(omarchy-notification-send -p -u normal -t "$(( left * 1000 ))" \
+          "$headline" "$body" --exec "$SELF" review 2>/dev/null) || nid=
+  local waiting; waiting="$(asks_py dir)/$id.json"
+  while [[ -e "$waiting" ]]; do sleep 1; done
+  [[ "$nid" =~ ^[0-9]+$ ]] && gdbus call --session --dest org.freedesktop.Notifications \
+    --object-path /org/freedesktop/Notifications \
+    --method org.freedesktop.Notifications.CloseNotification "$nid" >/dev/null 2>&1
+  return 0
+}
+
+# What a click on that notification does: open the panel on the question. A
+# shell without the panel loaded gets the question as a notification it can
+# act on from a terminal instead.
+cmd_review() {
+  omarchy-shell netmojo.omdrop review >/dev/null 2>&1 && return 0
+  omarchy-notification-send -u normal "Omdrop panel unavailable" \
+    "Run omdrop accept or omdrop decline in a terminal." >/dev/null 2>&1
+}
+
 # What to do with a file once the user has asked for it: `act open` is what the
 # notification fires when clicked, and shell/browse are here for the terminal.
 # Each goes through launch(), which keeps the app out of our cgroup.
@@ -2485,6 +2558,9 @@ case "${1:-status}" in
   open-link) shift; cmd_open_link "$@" ;;
   install-driver) shift; cmd_install_driver ;;
   firewall) shift; cmd_firewall "$@" ;;
+  accept|decline) cmd_answer "$@" ;;
+  prompt) shift; cmd_prompt "$@" ;;
+  review) shift; cmd_review ;;
   act)    shift; cmd_act "$@" ;;
   watch)  shift; cmd_watch "$@" ;;
   handle) shift; cmd_handle "$@" ;;

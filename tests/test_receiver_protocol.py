@@ -16,6 +16,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zlib
@@ -73,6 +74,7 @@ def dvzip(files):
 class ReceiverFixture(unittest.TestCase):
     visibility = "everyone"
     seed_identity = True
+    ask_timeout = 60
 
     @classmethod
     def setUpClass(cls):
@@ -101,12 +103,14 @@ class ReceiverFixture(unittest.TestCase):
         # machine must not decide what the test receiver presents.
         runtime = root / "run"
         runtime.mkdir(mode=0o700)
+        cls.asks = runtime / "omdrop" / "asks"
         env = dict(os.environ, XDG_CONFIG_HOME=str(xdg), XDG_RUNTIME_DIR=str(runtime))
         with open(cls.log, "w") as log:
             cls.proc = subprocess.Popen(
                 [sys.executable, str(SERVE), "--iface", "lo", "--port", str(cls.port),
                  "--name", NAME, "--model", MODEL, "--keys", str(cls.identity),
-                 "--outdir", str(cls.out), "--config", str(xdg / "airdrop" / "config.toml")],
+                 "--outdir", str(cls.out), "--config", str(xdg / "airdrop" / "config.toml"),
+                 "--ask-timeout", str(cls.ask_timeout)],
                 stdout=log, stderr=subprocess.STDOUT, env=env)
         deadline = time.monotonic() + 30
         while "receiving into" not in cls.log.read_text():
@@ -143,6 +147,26 @@ class ReceiverFixture(unittest.TestCase):
         self.addCleanup(conn.close)
         return conn
 
+    def answer_next_ask(self, said):
+        """Answer the next request the receiver records, as `omdrop accept` or
+        `omdrop decline` would; returns what it saw, once the thread is done."""
+        seen = {}
+
+        def answer():
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for request in self.asks.glob("*.json"):
+                    seen.update(json.loads(request.read_text()))
+                    if said:
+                        (self.asks / f"{request.stem}.answer").write_text(said + "\n")
+                    return
+                time.sleep(0.02)
+
+        thread = threading.Thread(target=answer)
+        thread.start()
+        self.addCleanup(thread.join)
+        return thread, seen
+
     def post(self, conn, path, body, headers=None):
         # An iterable body with no length is what makes http.client chunk it,
         # which is how sharingd frames /Discover and /Ask.
@@ -177,6 +201,7 @@ class ExistingIdentityTests(ReceiverFixture):
             "TransferType": {"files": 1}, "Items": [],
             "Files": [{"FileName": "hello.txt", "FileType": "public.plain-text", "FileSize": 12}],
         }, fmt=plistlib.FMT_BINARY)
+        self.answer_next_ask("accept")
         status, body = self.post(conn, "/Ask", ask)
         self.assertEqual(status, 200)
         self.assertEqual(set(plistlib.loads(body)),
@@ -194,6 +219,95 @@ class ExistingIdentityTests(ReceiverFixture):
         status, _ = self.post(self.connection(client_cert=True, tls12=True), "/Discover",
                               plistlib.dumps({}, fmt=plistlib.FMT_BINARY))
         self.assertEqual(status, 200)
+
+
+def files_ask(name="hello.txt", sender="Mac"):
+    return plistlib.dumps({
+        "SenderComputerName": sender, "SenderModelName": "MacBookPro18,3",
+        "TransferType": {"files": 1}, "Items": [],
+        "Files": [{"FileName": name, "FileType": "public.plain-text", "FileSize": 12}],
+    }, fmt=plistlib.FMT_BINARY)
+
+
+def upload_headers(tid):
+    return {"Content-Type": "application/x-dvzip", "TransferID": tid,
+            "Expect": "100-continue"}
+
+
+class AskFirstTests(ReceiverFixture):
+    """Nothing arrives until the user accepts it, as on an Apple device."""
+
+    def test_the_request_is_recorded_for_the_user_to_answer(self):
+        thread, seen = self.answer_next_ask("decline")
+        self.post(self.connection(), "/Ask", files_ask("report.pdf", "Ana\u202eiPhone"))
+        thread.join()
+        self.assertEqual(seen["sender"], "AnaiPhone")   # the bidi override is not shown
+        self.assertEqual(seen["files"], [{"name": "report.pdf", "size": 12}])
+        self.assertRegex(seen["id"], r"^[0-9a-f]{16}$")
+        # Answered requests do not linger for the panel to show.
+        self.assertEqual(list(self.asks.iterdir()), [])
+
+    def test_a_declined_transfer_is_refused_and_nothing_is_stored(self):
+        conn = self.connection()
+        self.answer_next_ask("decline")
+        status, _ = self.post(conn, "/Ask", files_ask("declined.txt"))
+        self.assertEqual(status, 403)
+        self.assertFalse((self.out / "declined.txt").exists())
+
+    def test_an_upload_without_an_accepted_ask_is_refused(self):
+        # Skipping /Ask must not skip the question.
+        status, _ = self.post(self.connection(), "/Upload", dvzip([("sneaky.txt", b"x")]),
+                              upload_headers("T2"))
+        self.assertEqual(status, 403)
+        self.assertFalse((self.out / "sneaky.txt").exists())
+
+    def test_one_accepted_ask_admits_one_upload(self):
+        conn = self.connection()
+        self.answer_next_ask("accept")
+        self.assertEqual(self.post(conn, "/Ask", files_ask("first.txt"))[0], 200)
+        self.assertEqual(self.post(conn, "/Upload", dvzip([("first.txt", b"1")]),
+                                   upload_headers("T3"))[0], 200)
+        status, _ = self.post(conn, "/Upload", dvzip([("second.txt", b"2")]), upload_headers("T4"))
+        self.assertEqual(status, 403)
+        self.assertFalse((self.out / "second.txt").exists())
+
+    def test_a_link_is_stored_only_once_accepted(self):
+        link = plistlib.dumps({"SenderComputerName": "iPhone", "TransferType": {"links": 1},
+                               "Items": ["https://example.com/declined-page"]},
+                              fmt=plistlib.FMT_BINARY)
+        thread, seen = self.answer_next_ask("decline")
+        self.assertEqual(self.post(self.connection(), "/Ask", link)[0], 403)
+        thread.join()
+        self.assertEqual(seen["links"], ["https://example.com/declined-page"])
+        self.assertEqual(list(self.out.glob("*declined-page*")), [])
+
+        link = link.replace(b"declined-page", b"accepted-page")
+        self.answer_next_ask("accept")
+        self.assertEqual(self.post(self.connection(), "/Ask", link)[0], 200)
+        self.assertEqual(len(list(self.out.glob("*accepted-page*.url"))), 1)
+
+    def test_a_sender_that_stops_waiting_withdraws_its_request(self):
+        thread, seen = self.answer_next_ask(None)
+        conn = self.connection()
+        conn.request("POST", "/Ask", body=iter([files_ask("abandoned.txt")]))
+        thread.join()
+        self.assertTrue(seen)
+        conn.close()
+        deadline = time.monotonic() + 5
+        while list(self.asks.glob("*.json")) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(list(self.asks.glob("*.json")), [])
+
+
+class UnansweredAskTests(ReceiverFixture):
+    ask_timeout = 5
+
+    def test_an_unanswered_request_is_declined_when_it_expires(self):
+        started = time.monotonic()
+        status, _ = self.post(self.connection(), "/Ask", files_ask("ignored.txt"))
+        self.assertEqual(status, 403)
+        self.assertGreaterEqual(time.monotonic() - started, 4.5)
+        self.assertEqual(list(self.asks.glob("*.json")), [])
 
 
 class FirstStartTests(ReceiverFixture):

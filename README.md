@@ -44,7 +44,9 @@ Click the icon to open the panel:
 - **They see you as** sets the name Apple devices show. It defaults to the hostname.
 - **Save files to** opens a folder chooser. It defaults to `~/Downloads`.
 
-Received files are saved, copied to the clipboard, and announced in a notification. Clicking the notification opens the file.
+Nothing arrives until you accept it. When someone sends you something, a notification names the sender and what they're sending, and the bar icon lights up. Click the notification to open the panel, which shows the request with **Accept** and **Decline** buttons. Until you answer, the sender sees "Waiting...". A request you don't answer within a minute is declined. From a terminal, `omdrop accept` and `omdrop decline` answer it too. This applies in Contacts Only mode as well: it limits who can ask, but you still choose what arrives.
+
+Accepted files are saved, copied to the clipboard, and announced in a notification. Clicking the notification opens the file.
 
 A shared link arrives as a `.url` or `.webloc` file. Clicking its notification, or double-clicking it in Files, opens it in your browser. Only `http` and `https` links open; a link to anything else, such as `file://` or `smb://`, is refused with a notification, because it was chosen by whoever sent it.
 
@@ -70,7 +72,9 @@ omdrop on 15                      # visible to everyone for 15 minutes
 omdrop on -c 10m                  # Contacts Only, for 10 minutes
 omdrop on once                    # until one file arrives
 omdrop off                        # refuses while a send is running; --force stops anyway
-omdrop status
+omdrop status                     # also lists transfers waiting for an answer
+omdrop accept                     # let the waiting transfer arrive
+omdrop decline                    # or refuse it; with several waiting, add the ID from status
 omdrop name "Study Mac"
 omdrop dir ~/Drops
 omdrop limit 30                   # largest transfer, as % of free disk space
