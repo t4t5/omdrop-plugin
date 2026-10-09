@@ -125,8 +125,9 @@ Panel {
     }
   }
 
-  // The requests' toasts sit on the overlay layer, above this panel, so they
-  // go whenever the panel is showing the requests themselves.
+  // No toast is sent while this panel is open (see `showing` below). One that
+  // is already up sits on the overlay layer, over the card, so opening the
+  // panel takes it down.
   Process { id: dismissPromptsProc; command: [root.cli, "prompt", "--dismiss"] }
   function dismissPrompts() {
     if (opened && asks.length > 0 && !dismissPromptsProc.running) dismissPromptsProc.running = true
@@ -924,7 +925,6 @@ Panel {
       if (!audienceProc.running) audience = s.visibility === "contacts" ? "contacts" : "everyone"
       senders = s.senders || 0
       asks = s.asks || []
-      dismissPrompts()
       if (!nameField.activeFocus) nameField.text = shownName
       // Asked once per transition into unusable, not on every poll.
       if (!usable && doctorText === "" && !doctorProc.running) doctorProc.running = true
@@ -990,6 +990,8 @@ Panel {
     function review(): string { root.refreshStatus(); root.open(); return "ok" }
     // A request arrived or was answered elsewhere: redraw without waiting.
     function refresh(): string { root.refreshStatus(); return "ok" }
+    // Whether a request would be seen here, so it needs no notification.
+    function showing(): string { return root.opened ? "yes" : "no" }
   }
 
   BarIconButton {

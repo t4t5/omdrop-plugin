@@ -2299,10 +2299,11 @@ cmd_prompt() {
   local id=${1:?usage: omdrop prompt ID|--dismiss} sender body left
   { IFS= read -r sender && IFS= read -r body && IFS= read -r left; } < <(asks_py toast "$id") \
     || return 0
+  omarchy-shell -q netmojo.omdrop refresh >/dev/null 2>&1 || true
+  # An open panel shows the request itself; a toast would only cover it.
+  [[ "$(omarchy-shell netmojo.omdrop showing 2>/dev/null)" == yes ]] && return 0
   omarchy-notification-send -u normal -t "$(( left * 1000 ))" \
     "$sender$PROMPT_TAIL" "$body" --exec "$SELF" review >/dev/null 2>&1
-  # After the toast, so a panel that is already open takes it straight down.
-  omarchy-shell -q netmojo.omdrop refresh >/dev/null 2>&1 || true
   local waiting; waiting="$(asks_py dir)/$id.json"
   while [[ -e "$waiting" ]]; do sleep 1; done
   omarchy-shell -q notifications dismiss "$sender$PROMPT_TAIL" >/dev/null 2>&1
