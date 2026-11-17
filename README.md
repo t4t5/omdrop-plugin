@@ -10,6 +10,8 @@ AirDrop for [Omarchy](https://omarchy.org) Apple Silicon Macs with Broadcom WiFi
 
 For AirDrop on other hardware, see [OpenDrop](https://github.com/seemoo-lab/opendrop) and [owl](https://github.com/seemoo-lab/owl), which implement AWDL in userspace over monitor mode. [LocalSend](https://localsend.org), which ships with Omarchy, is an open alternative that needs its app on every device.
 
+On non-Arch distributions, [Owly's radio backend](extensions/owly/README.md) lets this panel and the `omdrop` command work with Intel, Realtek, MediaTek and Atheros cards. The extension includes a cross-distro installer for the backend helpers.
+
 ## Install
 
 ```bash
